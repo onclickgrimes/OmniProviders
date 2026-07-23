@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.providers.gemini_web import GeminiWebProviderAdapter
+from app.providers.gemini_web.transport import GeminiScrapingService
 from app.runtime.registry import ProviderRegistry
 
 
@@ -66,6 +67,30 @@ class GeminiWebAdapterContractTest(unittest.TestCase):
         )
         self.assertEqual(400, response.status_code)
         self.assertEqual("unsupported_tools", response.json()["error"]["code"])
+
+
+class _ExpiredAccountStatus:
+    name = "UNAUTHENTICATED"
+    description = "cookies expired"
+
+
+class _ExpiredGeminiClient:
+    account_status = _ExpiredAccountStatus()
+
+    def list_models(self):
+        return [{"model_name": "gemini-3-pro"}]
+
+
+class GeminiWebExpiredSessionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_expired_sdk_session_is_not_reported_as_logged_in(self) -> None:
+        transport = GeminiScrapingService(client=_ExpiredGeminiClient())
+        transport._dependency_available = lambda: True
+
+        result = await transport.check_login()
+
+        self.assertFalse(result["success"])
+        self.assertFalse(result["isLoggedIn"])
+        self.assertEqual("UNAUTHENTICATED", result["accountStatus"])
 
 
 if __name__ == "__main__":

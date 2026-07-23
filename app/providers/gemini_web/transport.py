@@ -368,17 +368,17 @@ class GeminiScrapingService:
             account_status = _account_status_info(client)
             is_account_available = _is_authenticated_status(account_status)
             result = {
-                "success": True,
-                "isLoggedIn": True,
+                "success": is_account_available,
+                "isLoggedIn": is_account_available,
                 "isAccountAvailable": is_account_available,
-                "models": models,
+                "models": models if is_account_available else [],
                 "accountStatus": account_status.get("name"),
                 "accountStatusDescription": account_status.get("description"),
             }
             if is_account_available:
                 result.update(self._session_identity_info(is_account_available))
             if not is_account_available:
-                result["warning"] = _account_status_error(account_status)
+                result["error"] = _account_status_error(account_status)
             return result
         except GeminiScrapingError as exc:
             return {"success": False, "isLoggedIn": False, "error": str(exc)}
