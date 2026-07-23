@@ -17,6 +17,17 @@ from app.providers.google_genai.media import GoogleMediaService
 from app.providers.google_genai.voice import GeminiVoiceError, GeminiVoiceService
 
 
+THINKING_LEVELS: tuple[tuple[str, str], ...] = (
+    ("low", "Baixo"),
+    ("medium", "Médio"),
+    ("high", "Alto"),
+)
+
+CONVERSATIONAL_MODELS: dict[str, str] = {
+    "gemini-3.6-flash": "Gemini 3.6 Flash",
+    "gemini-3.1-pro-preview": "Gemini 3.1 Pro Preview",
+}
+
 TTS_MODELS_BY_PROVIDER: dict[str, tuple[tuple[str, str], ...]] = {
     "gemini": (
         ("gemini-3.1-flash-tts-preview", "Gemini 3.1 Flash TTS Preview"),
@@ -33,13 +44,8 @@ TTS_MODELS_BY_PROVIDER: dict[str, tuple[tuple[str, str], ...]] = {
 
 VERTEX_VERIFIED_MODELS: tuple[dict[str, Any], ...] = (
     {
-        "id": "gemini-2.5-flash",
-        "label": "Gemini 2.5 Flash",
-        "supportedActions": ["generateContent"],
-    },
-    {
-        "id": "gemini-2.5-pro",
-        "label": "Gemini 2.5 Pro",
+        "id": "gemini-3.6-flash",
+        "label": "Gemini 3.6 Flash",
         "supportedActions": ["generateContent"],
     },
     {
@@ -90,19 +96,50 @@ def _capabilities(item: dict[str, Any]) -> ModelCapabilities:
             output_modalities=frozenset({"audio"}),
             operations=frozenset({"audio.speech"}),
         )
-    output_modalities = {"text"}
-    operations = {"responses", "chat.completions"}
-    if "image" in model:
-        output_modalities.add("image")
-        operations.add("images.generate")
+    if (
+        "image" in model
+        or model.startswith("imagen-")
+        or model.startswith("nano-banana")
+    ):
+        return ModelCapabilities(
+            input_modalities=frozenset({"text", "image"}),
+            output_modalities=frozenset({"image"}),
+            operations=frozenset({"images.generate"}),
+        )
     return ModelCapabilities(
         input_modalities=frozenset({"text", "image", "video", "audio"}),
-        output_modalities=frozenset(output_modalities),
+        output_modalities=frozenset({"text"}),
         structured_output=True,
         streaming=False,
         tool_calling="native",
-        operations=frozenset(operations),
+        operations=frozenset({"responses", "chat.completions"}),
     )
+
+
+def _model_id(item: dict[str, Any]) -> str:
+    return str(item.get("id") or item.get("name") or "").strip().removeprefix("models/")
+
+
+def _metadata(item: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    return {
+        **{
+            key: item[key]
+            for key in ("description", "version", "supportedActions", "catalogSource")
+            if item.get(key) is not None
+        },
+        **extra,
+    }
+
+
+def _thinking_variant(model: str) -> tuple[str, str | None]:
+    base_model, separator, level = str(model or "").rpartition("@")
+    if (
+        separator
+        and base_model in CONVERSATIONAL_MODELS
+        and level in {value for value, _label in THINKING_LEVELS}
+    ):
+        return base_model, level
+    return str(model or ""), None
 
 
 class GoogleGenAIProviderAdapter:
@@ -132,23 +169,58 @@ class GoogleGenAIProviderAdapter:
             raw_models = await self._transport.list_models()
         except Exception:
             raw_models = []
+        live_discovery = "account_live" if self.provider_id == "vertex" else "provider_live"
+        raw_models = [
+            {**item, "_discovery": live_discovery}
+            for item in raw_models
+            if isinstance(item, dict)
+        ]
         if self.provider_id == "vertex":
             live_ids = {
-                str(item.get("id") or item.get("name") or "").removeprefix("models/")
+                _model_id(item)
                 for item in raw_models
-                if isinstance(item, dict)
             }
             raw_models = [
                 *raw_models,
-                *(item for item in VERTEX_VERIFIED_MODELS if item["id"] not in live_ids),
+                *(
+                    {
+                        **item,
+                        "_discovery": "static_verified",
+                        "catalogSource": "vertex_verified_fallback",
+                    }
+                    for item in VERTEX_VERIFIED_MODELS
+                    if item["id"] not in live_ids
+                ),
             ]
         descriptors: list[ModelDescriptor] = []
         for item in raw_models:
-            if not isinstance(item, dict):
-                continue
-            raw_id = str(item.get("id") or item.get("name") or "").strip()
-            model = raw_id.removeprefix("models/")
+            model = _model_id(item)
             if not model:
+                continue
+            discovery = str(item.get("_discovery") or live_discovery)
+            if model in CONVERSATIONAL_MODELS:
+                for thinking_level, thinking_label in THINKING_LEVELS:
+                    descriptors.append(
+                        ModelDescriptor(
+                            provider=self.provider_id,
+                            model=f"{model}@{thinking_level}",
+                            label=f"{CONVERSATIONAL_MODELS[model]} ({thinking_label})",
+                            available=bool(item.get("available", True)),
+                            discovery=discovery,
+                            effective_model=model,
+                            capabilities=_capabilities({**item, "id": model}),
+                            metadata=_metadata(
+                                item,
+                                thinkingLevel=thinking_level,
+                            ),
+                        )
+                    )
+                continue
+            capabilities = _capabilities({**item, "id": model})
+            if not (
+                capabilities.operations
+                & frozenset({"images.generate", "videos.generate", "audio.speech"})
+            ):
                 continue
             descriptors.append(
                 ModelDescriptor(
@@ -156,13 +228,9 @@ class GoogleGenAIProviderAdapter:
                     model=model,
                     label=str(item.get("label") or item.get("displayName") or model),
                     available=bool(item.get("available", True)),
-                    discovery="account_live" if self.provider_id == "vertex" else "provider_live",
-                    capabilities=_capabilities({**item, "id": model}),
-                    metadata={
-                        key: item[key]
-                        for key in ("description", "version", "supportedActions")
-                        if item.get(key) is not None
-                    },
+                    discovery=discovery,
+                    capabilities=capabilities,
+                    metadata=_metadata(item),
                 )
             )
         known_models = {descriptor.model for descriptor in descriptors}
@@ -183,14 +251,16 @@ class GoogleGenAIProviderAdapter:
 
     async def invoke(self, model: str, request: ModelInvocation) -> ModelResult:
         messages = messages_from_openai_input(request.input)
+        effective_model, thinking_level = _thinking_variant(model)
         try:
             if request.tools:
                 native = await self._transport.generate_native(
                     messages=messages,
-                    model=model,
+                    model=effective_model,
                     tools=list(request.tools),
                     tool_choice=request.tool_choice,
                     temperature=request.temperature,
+                    thinking_level=thinking_level,
                 )
                 calls = tuple(
                     FunctionCall(
@@ -207,21 +277,22 @@ class GoogleGenAIProviderAdapter:
                 )
                 return ModelResult(
                     text=str(native.get("text") or ""),
-                    effective_model=str(native.get("effectiveModel") or model),
+                    effective_model=str(native.get("effectiveModel") or effective_model),
                     function_calls=calls,
                     usage=dict(native.get("usage") or {}),
                 )
             text = await self._transport.generate_text_from_messages(
                 messages,
-                model=model,
+                model=effective_model,
                 temperature=request.temperature if request.temperature is not None else 0.4,
                 response_json=request.response_format == "json",
+                thinking_level=thinking_level,
             )
         except GeminiApiError as exc:
             raise ModelRuntimeError(
                 str(exc), code="provider_error", status_code=502
             ) from exc
-        return ModelResult(text=text, effective_model=model)
+        return ModelResult(text=text, effective_model=effective_model)
 
     async def generate_images(self, model: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:

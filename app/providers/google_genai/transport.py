@@ -20,7 +20,7 @@ from app.protocols.structured_output import extract_json
 
 
 DEFAULT_MODEL = "gemini-3.1-pro-preview"
-VERTEX_DEFAULT_MODEL = "gemini-2.5-flash"
+VERTEX_DEFAULT_MODEL = "gemini-3.1-pro-preview"
 MAX_INLINE_GEMINI_VIDEO_BYTES = 20 * 1024 * 1024
 MAX_INLINE_GEMINI_AUDIO_BYTES = 20 * 1024 * 1024
 
@@ -79,6 +79,15 @@ def _part_from_bytes(data: bytes, mime_type: str) -> types.Part:
             mime_type=mime_type,
         )
     )
+
+
+def _thinking_config(thinking_level: str | None) -> types.ThinkingConfig | None:
+    normalized = str(thinking_level or "").strip().upper()
+    if not normalized:
+        return None
+    if normalized not in {"LOW", "MEDIUM", "HIGH"}:
+        raise GeminiApiError(f"Unsupported Gemini thinking level: {thinking_level}")
+    return types.ThinkingConfig(thinking_level=normalized)
 
 
 def resolve_video_genai_backend() -> str:
@@ -476,6 +485,7 @@ class GeminiApiService:
         temperature: float | None = 0.4,
         response_json: bool = False,
         debug_context: dict[str, Any] | None = None,
+        thinking_level: str | None = None,
     ) -> dict[str, Any]:
         system_instruction, contents = self._build_native_contents(messages)
         if not contents:
@@ -488,12 +498,14 @@ class GeminiApiService:
             tools=native_tools or None,
             tool_config=self._build_tool_config(tool_choice) if native_tools else None,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            thinking_config=_thinking_config(thinking_level),
         )
         resolved_model = model or self._default_model()
         debug_request = {
             "contents": serialize_messages_for_ai_debug(messages),
             "tools": make_json_safe(native_tools),
             "toolChoice": make_json_safe(tool_choice),
+            "thinkingLevel": thinking_level,
         }
         metadata = {"backend": self._backend(), **(debug_context or {})}
         try:
@@ -587,6 +599,7 @@ class GeminiApiService:
         temperature: float = 0.4,
         response_json: bool = False,
         debug_context: dict[str, Any] | None = None,
+        thinking_level: str | None = None,
     ) -> str:
         system_instruction = ""
         contents: list[types.Content] = []
@@ -620,6 +633,7 @@ class GeminiApiService:
             temperature=temperature,
             system_instruction=system_instruction or None,
             response_mime_type="application/json" if response_json else None,
+            thinking_config=_thinking_config(thinking_level),
         )
         resolved_model = model or self._default_model()
         debug_request = {
@@ -634,6 +648,7 @@ class GeminiApiService:
             "config": {
                 "temperature": temperature,
                 "response_mime_type": "application/json" if response_json else None,
+                "thinking_level": thinking_level,
             },
         }
         metadata = {
