@@ -1,0 +1,8 @@
+.venv/
+build/
+data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+nuitka-crash-report.xml
