@@ -22,8 +22,15 @@ def load_attachment_bytes(
 ) -> tuple[bytes, str]:
     mime_type = mime_type or fallback_mime_type
     source = value
+    has_inline_data = False
     if isinstance(value, dict):
-        source = value.get("data") or value.get("url") or value.get("path") or value.get("source")
+        inline_data = value.get("data")
+        has_inline_data = inline_data is not None and inline_data != ""
+        source = (
+            inline_data
+            if has_inline_data
+            else value.get("url") or value.get("path") or value.get("source")
+        )
         mime_type = str(value.get("mime_type") or value.get("mimeType") or mime_type or "") or None
     if isinstance(source, bytes):
         data = source
@@ -33,10 +40,15 @@ def load_attachment_bytes(
             raise ModelMediaError("Attachment source is empty.")
         if text.startswith("data:") and "," in text:
             header, encoded = text.split(",", 1)
-            if not mime_type:
-                mime_type = header[5:].split(";", 1)[0] or None
+            declared_mime_type = header[5:].split(";", 1)[0].strip()
+            if declared_mime_type:
+                mime_type = declared_mime_type
             try:
-                data = base64.b64decode(encoded) if ";base64" in header else unquote(encoded).encode()
+                data = (
+                    base64.b64decode(encoded, validate=True)
+                    if ";base64" in header
+                    else unquote(encoded).encode()
+                )
             except Exception as exc:
                 raise ModelMediaError("Attachment data URL is invalid.") from exc
         elif text.startswith(("http://", "https://")):
@@ -44,8 +56,16 @@ def load_attachment_bytes(
             response.raise_for_status()
             data = response.content
             mime_type = mime_type or response.headers.get("content-type", "").split(";", 1)[0]
+        elif has_inline_data:
+            try:
+                data = base64.b64decode("".join(text.split()), validate=True)
+            except Exception as exc:
+                raise ModelMediaError("Attachment inline data is invalid base64.") from exc
         else:
-            path = Path(text).expanduser().resolve()
+            try:
+                path = Path(text).expanduser().resolve()
+            except (OSError, ValueError) as exc:
+                raise ModelMediaError("Attachment path is invalid or too long.") from exc
             if not path.is_file():
                 raise ModelMediaError(f"Attachment file not found: {path}")
             data = path.read_bytes()

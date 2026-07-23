@@ -6,6 +6,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.protocols.openai_input import messages_from_openai_input
 from app.providers.antigravity import AntigravityProviderAdapter
 from app.providers.antigravity.transport import AntigravityOAuthService
 from app.runtime.registry import ProviderRegistry
@@ -154,6 +155,35 @@ class AntigravityAdapterContractTest(unittest.TestCase):
         self.assertEqual("get_scene", declaration["name"])
         self.assertEqual(["number"], declaration["parameters"]["required"])
         self.assertEqual("call_scene_2", result["functionCalls"][0]["call_id"])
+
+    def test_transport_preserves_inline_image_from_responses_input(self) -> None:
+        transport = CapturingAntigravityTransport()
+        messages = messages_from_openai_input(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Crie o animateFrame."},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/jpeg;base64,/9j/2Q==",
+                        },
+                    ],
+                }
+            ]
+        )
+
+        payload = transport._build_request_payload(
+            messages,
+            actual_model="gemini-3.5-flash",
+            thinking_level="medium",
+            temperature=0.4,
+            response_json=True,
+        )
+
+        inline_data = payload["request"]["contents"][0]["parts"][1]["inlineData"]
+        self.assertEqual("image/jpeg", inline_data["mimeType"])
+        self.assertEqual("/9j/2Q==", inline_data["data"])
 
 
 if __name__ == "__main__":

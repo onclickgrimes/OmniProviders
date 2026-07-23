@@ -68,9 +68,9 @@ def messages_from_openai_input(value: Any) -> list[dict[str, Any]]:
                         }
                     )
                 elif part_type in {"input_audio", "audio"}:
-                    parts.append({"type": "audio", **part})
+                    parts.append({**part, "type": "audio"})
                 elif part_type in {"input_file", "file"}:
-                    parts.append({"type": "file", **part})
+                    parts.append({**part, "type": "file"})
         messages.append({"role": role, "parts": parts})
     return messages
 
